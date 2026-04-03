@@ -1,64 +1,70 @@
+"""성과 지표 계산."""
+
 import numpy as np
 import pandas as pd
 from .engine import Trade
 
 
-class PerformanceMetrics:
-    """백테스트 결과로부터 성과 지표를 계산합니다."""
+def calc_metrics(trades: list[Trade], equity_curve: pd.DataFrame,
+                 initial_capital: float, strategy_name: str, interval: str) -> dict:
+    if not trades:
+        return _empty(strategy_name, interval)
 
-    def __init__(self, result: dict):
-        self.trades: list[Trade] = result["trades"]
-        self.equity_curve: pd.DataFrame = result["equity_curve"]
-        self.initial_capital: float = result["equity_curve"]["equity"].iloc[0] if not result["equity_curve"].empty else 0
-        self.final_capital: float = result["final_capital"]
-        self.strategy = result["strategy"]
+    pnls      = [t.pnl for t in trades if t.pnl is not None]
+    wins      = [p for p in pnls if p > 0]
+    losses    = [p for p in pnls if p <= 0]
+    equity    = equity_curve["equity"]
+    final_cap = equity.iloc[-1]
 
-    def summary(self) -> dict:
-        trades = self.trades
-        equity = self.equity_curve["equity"]
+    total_return = (final_cap / initial_capital - 1) * 100
+    win_rate     = len(wins) / len(pnls) * 100 if pnls else 0
+    avg_win      = np.mean(wins)   if wins   else 0
+    avg_loss     = np.mean(losses) if losses else 0
+    profit_factor = (abs(sum(wins)) / abs(sum(losses))
+                     if losses and sum(losses) != 0 else float("inf"))
 
-        if not trades:
-            return {"error": "거래 없음 — 시그널이 발생하지 않았습니다."}
+    # 최대 낙폭
+    peak  = equity.cummax()
+    mdd   = ((equity - peak) / peak * 100).min()
 
-        pnl_list = [t.pnl for t in trades if t.pnl is not None]
-        pnl_pct_list = [t.pnl_pct for t in trades if t.pnl_pct is not None]
-        winning = [p for p in pnl_list if p > 0]
-        losing = [p for p in pnl_list if p <= 0]
+    # 샤프 비율 (일 수익률 기준 연환산)
+    rets  = equity.pct_change().dropna()
+    sharpe = (rets.mean() / rets.std() * np.sqrt(252)) if rets.std() > 0 else 0
 
-        total_return_pct = (self.final_capital / self.initial_capital - 1) * 100
-        win_rate = len(winning) / len(trades) * 100 if trades else 0
-        avg_win = np.mean(winning) if winning else 0
-        avg_loss = np.mean(losing) if losing else 0
-        profit_factor = abs(sum(winning) / sum(losing)) if losing else float("inf")
-        max_dd = self._max_drawdown(equity)
-        sharpe = self._sharpe_ratio(equity)
+    # 청산 횟수
+    liq_count = sum(1 for t in trades if t.exit_reason == "LIQ")
 
-        return {
-            "strategy": str(self.strategy),
-            "total_trades": len(trades),
-            "winning_trades": len(winning),
-            "losing_trades": len(losing),
-            "win_rate_pct": round(win_rate, 2),
-            "total_return_pct": round(total_return_pct, 2),
-            "profit_factor": round(profit_factor, 3),
-            "avg_win_usdt": round(avg_win, 2),
-            "avg_loss_usdt": round(avg_loss, 2),
-            "max_drawdown_pct": round(max_dd, 2),
-            "sharpe_ratio": round(sharpe, 3),
-            "initial_capital": round(self.initial_capital, 2),
-            "final_capital": round(self.final_capital, 2),
-        }
+    # 평균 보유 시간 (봉 단위)
+    hold_times = []
+    for t in trades:
+        if t.exit_time and t.entry_time:
+            hold_times.append((t.exit_time - t.entry_time).total_seconds())
+    avg_hold_sec = np.mean(hold_times) if hold_times else 0
 
-    @staticmethod
-    def _max_drawdown(equity: pd.Series) -> float:
-        peak = equity.cummax()
-        drawdown = (equity - peak) / peak * 100
-        return drawdown.min()
+    return {
+        "strategy":       strategy_name,
+        "interval":       interval,
+        "total_return":   round(total_return, 2),
+        "final_capital":  round(final_cap, 2),
+        "mdd":            round(mdd, 2),
+        "sharpe":         round(sharpe, 3),
+        "win_rate":       round(win_rate, 1),
+        "total_trades":   len(pnls),
+        "winning":        len(wins),
+        "losing":         len(losses),
+        "liq_count":      liq_count,
+        "avg_win":        round(avg_win, 2),
+        "avg_loss":       round(avg_loss, 2),
+        "profit_factor":  round(profit_factor, 3) if np.isfinite(profit_factor) else "∞",
+        "avg_hold_sec":   round(avg_hold_sec),
+    }
 
-    @staticmethod
-    def _sharpe_ratio(equity: pd.Series, risk_free: float = 0.0) -> float:
-        returns = equity.pct_change().dropna()
-        if returns.std() == 0:
-            return 0.0
-        # 일간 기준으로 연환산 (252거래일)
-        return (returns.mean() - risk_free) / returns.std() * np.sqrt(252)
+
+def _empty(strategy_name, interval):
+    return {
+        "strategy": strategy_name, "interval": interval,
+        "total_return": 0, "final_capital": 0, "mdd": 0, "sharpe": 0,
+        "win_rate": 0, "total_trades": 0, "winning": 0, "losing": 0,
+        "liq_count": 0, "avg_win": 0, "avg_loss": 0,
+        "profit_factor": 0, "avg_hold_sec": 0,
+    }
