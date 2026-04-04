@@ -143,8 +143,9 @@ class BacktestEngine:
             min_offset = min(first_tp, first_sl, first_liq)
 
             if min_offset >= N_future:
-                exit_idx    = n - 1
-                exit_price  = closes[-1]
+                # max_hold_bars 이후 강제 청산 (데이터 마지막 봉 아님)
+                exit_idx    = min(sig_i + self.max_hold_bars, n - 1)
+                exit_price  = closes[exit_idx]
                 exit_reason = "FORCE"
             else:
                 exit_idx = sig_i + 1 + min_offset

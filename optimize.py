@@ -1,7 +1,7 @@
 """
 파라미터 그리드 서치 최적화
 ============================
-전략 A (BB 스퀴즈+EMA) / 전략 B (BB 터치)의
+전략 A (BB 스퀴즈+EMA) / 전략 B (BB 터치+RSI)의
 모든 파라미터 조합을 자동 탐색, 수익 나는 조합을 랭킹으로 출력.
 
 최적화 기법:
@@ -12,7 +12,8 @@
 사용:
   python optimize.py
   python optimize.py --interval 5m 15m --top 30
-  python optimize.py --interval 5m --leverage 10 --no-trend-filter
+  python optimize.py --interval 15m 1h --leverage 10
+  python optimize.py --interval 5m --no-trend-filter
 """
 
 import argparse
@@ -29,28 +30,33 @@ from backtester import BacktestEngine, calc_metrics
 
 
 # ──────────────────────────────────────────────
-# 파라미터 그리드
+# 파라미터 그리드 (bb_std 제거 - 수학적으로 무의미)
 # ──────────────────────────────────────────────
 GRID_A = {
     "bb_period":          [20],
-    "bb_std":             [1.5, 2.0, 2.5],
     "ema_period":         [10, 20, 50],
     "squeeze_percentile": [10, 20, 30],
     "slope_period":       [2, 3, 5],
+    "use_rsi":            [False, True],   # RSI 모멘텀 필터 ON/OFF
+    "rsi_long_min":       [50.0],
+    "rsi_short_max":      [50.0],
 }
 
 GRID_B = {
-    "bb_period":      [20],
-    "bb_std":         [1.5, 2.0, 2.5],
-    "confirm_candle": [True, False],
-    "ema_filter":     [True],
-    "ema_period":     [20, 50, 100],
+    "bb_period":        [20],
+    "confirm_candle":   [True, False],
+    "ema_period":       [20, 50],
+    "ema_slope_period": [3, 5],
+    "use_rsi":          [True],
+    "rsi_long_max":     [40.0, 50.0],   # 롱: RSI 이하일 때 (낮을수록 엄격)
+    "rsi_short_min":    [50.0, 60.0],   # 숏: RSI 이상일 때 (높을수록 엄격)
+    "use_ema_slope":    [True, False],
 }
 
 GRID_ENGINE = {
     "sl_atr_mult":   [1.0, 1.5, 2.0],
-    "tp_atr_mult":   [2.5, 3.0, 4.0],
-    "max_hold_bars": [200, 500],
+    "tp_atr_mult":   [2.0, 3.0, 4.0],
+    "max_hold_bars": [100, 200, 500],
 }
 
 TREND_TF_MAP  = {"1m": "15m", "3m": "15m", "5m": "1h", "15m": "1h", "30m": "4h", "1h": "4h"}
@@ -81,7 +87,6 @@ def apply_trend_filter(signals: pd.Series, trend: pd.Series) -> pd.Series:
 # 단일 백테스트 (multiprocessing worker용)
 # ──────────────────────────────────────────────
 def _worker(task):
-    """(df, signals_vals, signals_idx, ep, initial_capital, leverage, interval, strategy_name) → metrics dict"""
     df, sig_vals, ep, capital, leverage, interval, strat_name = task
 
     signals = pd.Series(sig_vals, index=df.index)
@@ -123,7 +128,8 @@ def grid_search(df, trend, interval, capital, leverage,
                    if use_trend_filter else "추세X")
 
     # ── 신호 사전 생성 (전략 파라미터별 1회) ──
-    print(f"  [{interval}/{trend_label}] 신호 생성 중 ({len(combos_A)+len(combos_B)}개 전략)...", end=" ", flush=True)
+    n_total = len(combos_A) + len(combos_B)
+    print(f"  [{interval}/{trend_label}] 신호 생성 중 ({n_total}개 전략)...", end=" ", flush=True)
     strategy_signals = []  # [(strat_name, sig_vals)]
 
     for sp in combos_A:
@@ -176,9 +182,9 @@ def print_results(all_results, top_n, initial_capital):
     top      = all_results[:top_n]
 
     print(f"\n총 {len(all_results)}개 조합 | ★수익: {len(positive)}개 | ✗손실: {len(all_results)-len(positive)}개\n")
-    print("=" * 140)
+    print("=" * 150)
     print(f"  상위 {min(top_n, len(top))}개 결과 (수익률 기준 정렬)")
-    print("=" * 140)
+    print("=" * 150)
 
     rows = []
     for i, r in enumerate(top, 1):
@@ -186,7 +192,7 @@ def print_results(all_results, top_n, initial_capital):
         flag = "★" if r["total_return"] > 0 else "  "
         rows.append([
             f"{flag}{i}",
-            r["strategy"][:48],
+            r["strategy"][:55],
             r["interval"],
             r["trend_filter"],
             f"{r['sl_mult']}/{r['tp_mult']}",
@@ -204,7 +210,7 @@ def print_results(all_results, top_n, initial_capital):
     headers = ["#", "전략", "봉", "추세필터", "SL/TP×", "최대보유봉",
                "수익률", "샤프", "승률", "MDD", "거래수", "청산수", "수익팩터", "최종자본"]
     print(tabulate(rows, headers=headers, tablefmt="simple"))
-    print("=" * 140)
+    print("=" * 150)
 
     if positive:
         best = positive[0]
@@ -217,9 +223,8 @@ def print_results(all_results, top_n, initial_capital):
         print(f"   거래수    : {best['total_trades']}  |  청산수: {best['liq_count']}")
     else:
         print("\n⚠  수익 나는 조합 없음.")
-        print("   → 레버리지를 낮추거나 (--leverage 5)")
-        print("   → 기간을 늘리거나 (--start 2022-01)")
-        print("   → 최소 거래수를 낮춰보세요 (--min-trades 10)")
+        print(f"   최고 수익률: {all_results[0]['total_return']}% ({all_results[0]['strategy'][:40]})")
+        print("   → 전략 개선이 필요합니다.")
 
 
 # ──────────────────────────────────────────────
@@ -242,14 +247,16 @@ def parse_args():
 
 def main():
     args = parse_args()
-    print(f"\nBTC 선물 파라미터 최적화")
+    print(f"\nBTC 선물 파라미터 최적화 v2")
     print(f"기간: {args.start}~{args.end} | 레버리지: {args.leverage}x | "
           f"자본: ${args.capital:,.0f} | 워커: {args.workers}개")
 
+    combos_A = list(itertools.product(*GRID_A.values()))
+    combos_B = list(itertools.product(*GRID_B.values()))
     combos_E = list(itertools.product(*GRID_ENGINE.values()))
-    n_strat  = (len(list(itertools.product(*GRID_A.values()))) +
-                len(list(itertools.product(*GRID_B.values()))))
-    print(f"전략 조합: {n_strat}개 × 엔진 조합: {len(combos_E)}개 = 총 {n_strat*len(combos_E)}개")
+    n_strat  = len(combos_A) + len(combos_B)
+    print(f"전략 A: {len(combos_A)}개, 전략 B: {len(combos_B)}개 = 총 {n_strat}개")
+    print(f"엔진 조합: {len(combos_E)}개 → 최대 {n_strat * len(combos_E)}개 백테스트")
 
     all_results = []
 
@@ -274,10 +281,11 @@ def main():
         all_results.extend(r1)
 
         # 추세 필터 OFF (비교용)
-        r2 = grid_search(df, None, interval, args.capital, args.leverage,
-                         use_trend_filter=False, min_trades=args.min_trades,
-                         workers=args.workers)
-        all_results.extend(r2)
+        if args.no_trend_filter:
+            r2 = grid_search(df, None, interval, args.capital, args.leverage,
+                             use_trend_filter=False, min_trades=args.min_trades,
+                             workers=args.workers)
+            all_results.extend(r2)
 
     print_results(all_results, args.top, args.capital)
 
