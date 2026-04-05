@@ -1,0 +1,110 @@
+안녕 Claude. 이 프로젝트는 Binance Futures BTCUSDT 퍼페추얼 자동매매 봇이야.
+백테스팅으로 최적 파라미터를 찾는 작업이 방금 완료됐고, 이제 라이브 봇 구현이 남아있어.
+
+────────────────────────────────────────
+작업 히스토리
+────────────────────────────────────────
+
+처음에는 두 가지 전략을 테스트했어:
+- 전략 A: BB 스퀴즈 + EMA 슬로프 (bb_squeeze_ema.py)
+- 전략 B: BB 터치 평균회귀 (bb_touch.py)
+
+둘 다 승률 ~33%로 손익분기점 수준. 수수료 내면 손실.
+원인 분석: 평균회귀는 하락장에서 "싸다"고 롱 진입 → 더 폭락. 구조적 문제.
+
+그래서 방향을 바꿔서 두 가지 새 전략을 테스트했어:
+- EMA 풀백 전략 (ema_pullback.py): 3년 합계 -37%. 탈락.
+- BB 돌파 전략 (bb_breakout.py): 3년 합계 +38~41%. 채택.
+
+────────────────────────────────────────
+확정 전략
+────────────────────────────────────────
+
+BBBreakout(squeeze_pct=15, trend_filter=True, trend_ema=20)
+SL × 1.5 ATR, TP × 3.0 ATR (보수) 또는 4.0 ATR (공격)
+타임프레임: 1h
+레버리지: 10x, 거래당 리스크: 자본의 1%
+200일 MA 국면 필터 필수
+
+진입 로직:
+- 롱: BB폭이 최근 100봉 하위 15% 상태(스퀴즈)에서, 가격이 BB 상단을 상향 돌파 + EMA20 기울기 양수 + BTC > 200일 MA
+- 숏: 반대. BB 하단 하향 돌파 + EMA20 기울기 음수 + BTC < 200일 MA
+
+────────────────────────────────────────
+백테스트 성과 ($10,000 초기자본, 10x 레버리지, taker 수수료 0.05% 반영)
+────────────────────────────────────────
+
+             SL1.5/TP3   SL1.5/TP4
+2022 (곰장)    +4.6%       +9.0%    ← 숏만 진입, 국면 필터 덕분에 수익
+2023 (회복)   +16.1%      +19.8%
+2024 (불장)   +17.8%      +16.4%
+2025Q1        -0.1%       -3.4%    ← 불확실한 장세
+─────────────────────────────────
+3년 합계      +38.3%      +41.8%
+전체 기간     +44.3%      +49.4%   → 최종 $14,433 / $14,939
+
+승률: ~43%, 수익팩터: 1.25, 월평균 거래: 5~6건
+
+────────────────────────────────────────
+국면 필터 구현 (이게 핵심)
+────────────────────────────────────────
+
+def apply_regime(signals, df_daily, df_target):
+    ma200  = df_daily["close"].rolling(200).mean()
+    bull_r = (df_daily["close"] > ma200).astype(bool)
+    bear_r = (df_daily["close"] < ma200).astype(bool)
+    union  = bull_r.index.union(df_target.index)
+    bull_s = bull_r.reindex(union).ffill().reindex(df_target.index).fillna(False).astype(bool)
+    bear_s = bear_r.reindex(union).ffill().reindex(df_target.index).fillna(False).astype(bool)
+    result = signals.copy()
+    result[(signals ==  1) & (~bull_s)] = 0
+    result[(signals == -1) & (~bear_s)] = 0
+    return result
+
+주의: .astype(bool) 두 군데 다 필수.
+pandas에서 reindex() 후 NaN이 섞이면 dtype이 object로 바뀌고,
+그 상태에서 ~regime 하면 True→-2, False→-1 반환하는 버그 있음.
+이미 수정돼 있으니 건드리지 마.
+
+────────────────────────────────────────
+코드 구조
+────────────────────────────────────────
+
+strategies/
+  bb_breakout.py     ← 최종 전략. 이걸 써.
+  bb_squeeze_ema.py  ← 테스트됨, 성능 열세
+  bb_touch.py        ← 테스트됨, 신호 부족
+  ema_pullback.py    ← 테스트됨, -37% 탈락
+
+backtester/
+  engine.py          ← 벡터화 백테스팅 엔진. ATR 기반 SL/TP, 레버리지/청산 시뮬레이션 포함.
+
+download_data.py     ← Binance Vision OHLCV 다운로드 + parquet 캐시. fetch("1h", "2022-01", "2025-03") 형태로 호출.
+best_strategy.py     ← 최종 파라미터 정리 + 백테스트 실행 스크립트. 여기서 시작해.
+diagnose5~8.py       ← 파라미터 최적화 과정 기록. 참고용.
+optimize.py          ← 그리드 서치
+
+────────────────────────────────────────
+다음 단계: 라이브 봇 구현
+────────────────────────────────────────
+
+백테스트는 끝났어. 이제 실제 Binance Futures에서 돌아가는 봇을 만들어야 해.
+
+필요한 것들:
+1. Binance Futures WebSocket으로 1h 캔들 close 이벤트 수신
+2. 매시간 BBBreakout.generate_signals() + apply_regime() 실행
+3. 신호 발생 시 시장가 진입 주문 (REST API)
+4. SL/TP 브라켓 주문 자동 설정
+5. 포지션 중복 진입 방지 로직
+6. 포지션 상태 추적 (이미 포지션 있으면 새 신호 무시)
+
+목표는 실제 자동매매야. 페이퍼 트레이딩 아님.
+
+────────────────────────────────────────
+기타
+────────────────────────────────────────
+
+Git 브랜치: claude/bitcoin-backtesting-bot-qEVwm
+코드 전부 커밋됨. WIP 없음.
+백테스트 재현: python best_strategy.py
+데이터: 로컬 parquet 캐시에 있음 (없으면 download_data.py가 자동 다운로드)
