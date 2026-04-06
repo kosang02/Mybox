@@ -20,6 +20,16 @@ from fastapi.staticfiles import StaticFiles
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from trader.db import init_db, load_position, load_trades, load_equity
 
+LOG_PATH = Path(__file__).parent.parent / "bot.log"
+
+
+def read_logs(lines: int = 100) -> list[str]:
+    if not LOG_PATH.exists():
+        return []
+    with open(LOG_PATH, encoding="utf-8") as f:
+        all_lines = f.readlines()
+    return [l.rstrip() for l in all_lines[-lines:]]
+
 app = FastAPI(title="BTC Bot Dashboard")
 app.add_middleware(
     CORSMiddleware,
@@ -48,6 +58,9 @@ def get_status():
     wins      = sum(1 for t in trades if t["pnl"] > 0)
     win_rate  = round(wins / len(trades) * 100, 1) if trades else 0.0
 
+    latest_equity = load_equity(limit=1)
+    balance = latest_equity[0]["value"] if latest_equity else 0.0
+
     return {
         "position": position,
         "trades":   trades,
@@ -56,6 +69,7 @@ def get_status():
             "total_trades": len(trades),
             "total_pnl":    round(total_pnl, 2),
             "win_rate":     win_rate,
+            "balance":      round(balance, 2),
         },
     }
 
@@ -75,6 +89,11 @@ def get_equity(limit: int = 500):
     return load_equity(limit=limit)
 
 
+@app.get("/api/logs")
+def get_logs(lines: int = 100):
+    return {"logs": read_logs(lines)}
+
+
 # ── SSE — 2초마다 상태 push ──────────────────────────────────
 
 @app.get("/api/stream")
@@ -91,7 +110,9 @@ async def stream():
                     "win_rate":     round(
                         sum(1 for t in all_trades if t["pnl"] > 0) / len(all_trades) * 100, 1
                     ) if all_trades else 0.0,
+                    "balance":      round(load_equity(limit=1)[0]["value"], 2) if load_equity(limit=1) else 0.0,
                 },
+                "logs": read_logs(50),
             }
             yield f"data: {json.dumps(data)}\n\n"
             await asyncio.sleep(2)

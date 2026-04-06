@@ -44,6 +44,14 @@
     .chart-wrap { background:var(--sf); border:1px solid var(--bd); border-radius:10px; padding:16px; }
     canvas { width:100%; height:200px; display:block; }
 
+    /* 로그 */
+    .log-box { background:var(--sf); border:1px solid var(--bd); border-radius:10px; padding:14px 16px; font-family:'Courier New',monospace; font-size:11px; max-height:260px; overflow-y:auto; }
+    .log-line { padding:2px 0; border-bottom:1px solid rgba(48,54,61,.5); white-space:pre-wrap; word-break:break-all; }
+    .log-line:last-child { border-bottom:none; }
+    .log-line.info  { color:var(--tx); }
+    .log-line.warn  { color:var(--ac); }
+    .log-line.error { color:var(--rd); }
+
     /* 거래 테이블 */
     .tbl-wrap { background:var(--sf); border:1px solid var(--bd); border-radius:10px; overflow:hidden; }
     table { width:100%; border-collapse:collapse; font-size:12px; }
@@ -69,7 +77,8 @@
 
 <!-- 요약 카드 -->
 <div class="grid" id="summary-cards">
-  <div class="card accent"><div class="label">총 손익</div><div class="value" id="c-pnl">—</div></div>
+  <div class="card accent"><div class="label">현재 잔고</div><div class="value" id="c-balance">—</div><div class="sub">USDT</div></div>
+  <div class="card"><div class="label">총 손익</div><div class="value" id="c-pnl">—</div></div>
   <div class="card"><div class="label">총 거래</div><div class="value" id="c-trades">—</div></div>
   <div class="card"><div class="label">승률</div><div class="value" id="c-winrate">—</div></div>
   <div class="card"><div class="label">현재 포지션</div><div class="value" id="c-pos">없음</div></div>
@@ -89,6 +98,12 @@
   <div class="chart-wrap">
     <canvas id="equity-chart"></canvas>
   </div>
+</section>
+
+<!-- 봇 로그 -->
+<section>
+  <div class="sec-title">봇 로그 <span style="font-weight:400;color:var(--mt)">(최근 50줄)</span></div>
+  <div class="log-box" id="log-box"></div>
 </section>
 
 <!-- 거래 히스토리 -->
@@ -113,6 +128,9 @@ async function loadAll() {
   renderPosition(data.position);
   renderEquity(data.equity);
   renderTrades(data.trades);
+  const logRes = await fetch('/api/logs');
+  const logData = await logRes.json();
+  renderLogs(logData.logs);
 }
 
 // ── SSE 실시간 업데이트 ──────────────────────────────────────
@@ -132,6 +150,7 @@ function connectSSE() {
     renderSummary(d.summary);
     renderPosition(d.position);
     if (d.equity && d.equity.length) updateEquityPoint(d.equity[0]);
+    if (d.logs) renderLogs(d.logs);
   };
 }
 
@@ -144,6 +163,7 @@ function renderSummary(s) {
   el.className   = 'value ' + (pnl >= 0 ? 'pos' : 'neg');
   document.getElementById('c-trades').textContent  = s.total_trades ?? '—';
   document.getElementById('c-winrate').textContent = (s.win_rate != null ? s.win_rate + '%' : '—');
+  document.getElementById('c-balance').textContent = s.balance != null ? '$' + s.balance.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) : '—';
 }
 
 function renderPosition(pos) {
@@ -272,6 +292,23 @@ function drawChart() {
 // ── 유틸 ─────────────────────────────────────────────────────
 function fmt(v) {
   return v == null ? '—' : parseFloat(v).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
+}
+
+// ── 로그 렌더 ────────────────────────────────────────────────
+function renderLogs(logs) {
+  const box = document.getElementById('log-box');
+  if (!logs || !logs.length) {
+    box.innerHTML = '<div class="log-line info" style="color:var(--mt)">로그 없음</div>';
+    return;
+  }
+  const atBottom = box.scrollHeight - box.scrollTop <= box.clientHeight + 10;
+  box.innerHTML = logs.map(line => {
+    let cls = 'info';
+    if (line.includes('[WARNING]') || line.includes('[WARN]')) cls = 'warn';
+    else if (line.includes('[ERROR]') || line.includes('오류') || line.includes('ERROR')) cls = 'error';
+    return `<div class="log-line ${cls}">${line}</div>`;
+  }).join('');
+  if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
 // ── 초기화 ───────────────────────────────────────────────────

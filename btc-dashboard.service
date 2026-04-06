@@ -1,0 +1,16 @@
+[Unit]
+Description=BTC Bot Dashboard
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/kosang/Mybox
+ExecStart=/usr/bin/python3 -m uvicorn web.app:app --host 0.0.0.0 --port 80 --log-level warning
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
