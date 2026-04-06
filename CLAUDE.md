@@ -1,10 +1,6 @@
 # Bitcoin Futures Auto-Trading Bot - 프로젝트 인수인계
 
-## 프로젝트 개요
-Binance Futures BTCUSDT 퍼페추얼 자동매매 봇 개발.
-백테스트로 최적 전략 파라미터를 먼저 확정하고, 이후 실제 봇 구현 예정.
-
-## 현재 상태: 백테스팅 완료, 전략 확정됨
+## 현재 상태: **라이브 봇 + 웹 대시보드 구현 완료, 테스트넷 검증 대기 중**
 
 ---
 
@@ -18,7 +14,7 @@ BBBreakout(
     trend_ema=20,        # EMA20 기울기 방향 필터
 )
 # SL × 1.5 ATR
-# TP × 3.0 ATR (보수) 또는 4.0 ATR (공격)
+# TP × 3.0 ATR (보수) 또는 4.0 ATR (공격) — .env에서 설정
 # 200일 MA 국면 필터 필수
 # 타임프레임: 1h
 # 레버리지: 10x, 거래당 리스크: 자본의 1%
@@ -39,109 +35,158 @@ BBBreakout(
 
 ### 200일 MA 국면 필터 (핵심)
 ```python
-def apply_regime(signals, df_daily, df_target):
-    ma200  = df_daily["close"].rolling(200).mean()
-    bull_r = (df_daily["close"] > ma200).astype(bool)
-    bear_r = (df_daily["close"] < ma200).astype(bool)
-    union  = bull_r.index.union(df_target.index)
-    bull_s = bull_r.reindex(union).ffill().reindex(df_target.index).fillna(False).astype(bool)
-    bear_s = bear_r.reindex(union).ffill().reindex(df_target.index).fillna(False).astype(bool)
-    result = signals.copy()
-    result[(signals ==  1) & (~bull_s)] = 0   # 곰장에서 롱 제거
-    result[(signals == -1) & (~bear_s)] = 0   # 황소장에서 숏 제거
-    return result
-    # 주의: .astype(bool) 필수! 없으면 ~regime이 -2/-1을 반환하는 dtype 버그 있음
+# 주의: .astype(bool) 필수! 없으면 ~regime이 -2/-1을 반환하는 dtype 버그 있음
+result[(signals ==  1) & (~bull_s)] = 0   # 곰장에서 롱 제거
+result[(signals == -1) & (~bear_s)] = 0   # 황소장에서 숏 제거
 ```
 
 ---
 
-## 코드 구조
+## 코드 구조 (현재)
 
 ```
 Mybox/
 ├── strategies/
-│   ├── __init__.py
-│   ├── bb_squeeze_ema.py   # 전략 A (테스트됨, 성능 열세)
-│   ├── bb_touch.py         # 전략 B (테스트됨, 신호 부족)
-│   ├── bb_breakout.py      # ★ 최종 전략
-│   └── ema_pullback.py     # 테스트됨, -37% 탈락
+│   └── bb_breakout.py      # ★ 최종 전략 (BBBreakout 클래스)
 ├── backtester/
-│   └── engine.py           # 벡터화 백테스팅 엔진 (ATR SL/TP, 레버리지/청산 시뮬레이션)
-├── download_data.py        # Binance Vision 데이터 다운로드 + parquet 캐시
-├── best_strategy.py        # ★ 최종 파라미터 정리 및 백테스트 실행 스크립트
-├── diagnose5~8.py          # 파라미터 최적화 과정 스크립트
-└── optimize.py             # 그리드 서치
+│   └── engine.py           # 벡터화 백테스팅 엔진
+├── trader/
+│   ├── __init__.py         # LiveBot, BinanceFutures, init_db export
+│   ├── binance_futures.py  # Binance Futures REST + WebSocket 클라이언트
+│   ├── live_bot.py         # ★ 라이브 봇 본체
+│   └── db.py               # SQLite 영속화 (position/trades/equity)
+├── web/
+│   ├── app.py              # FastAPI 대시보드 백엔드 (SSE 포함)
+│   └── static/
+│       └── index.html      # 라이브 봇 대시보드 UI
+├── main.py                 # 봇 실행 진입점
+├── .env.example            # 환경변수 템플릿
+├── btc-bot.service         # systemd 서비스 파일
+└── requirements.txt
 ```
 
-## 데이터
-- Binance Vision BTCUSDT 퍼페추얼 선물 OHLCV
-- `fetch("1h", "2022-01", "2025-03")` 형태로 호출
-- parquet 파일로 로컬 캐시됨
+---
+
+## 이번 세션에서 구현한 것
+
+### 핵심 버그 수정
+- **`iloc[-1]` → `iloc[-2]`**: WebSocket 봉 마감 후 REST가 반환하는 마지막 봉은 항상 현재 진행 중인 미완성 봉. 신호 계산은 방금 닫힌 봉(`iloc[-2]`) 기준으로 해야 정확.
+
+### trader/db.py (신규)
+SQLite 영속화 모듈. 봇 재시작 시 포지션 복구에 핵심.
+- `save_position(side, entry_price, sl_price, tp_price, quantity, entry_time)`
+- `load_position()` → dict or None
+- `clear_position()`
+- `save_trade(...)` / `load_trades(limit)`
+- `save_equity(value)` / `load_equity(limit)`
+- DB 경로: `data/bot.db`
+
+### trader/live_bot.py (전면 재작성)
+1. **재시작 복구 로직** (`_recover_on_startup`):
+   - 거래소 포지션 확인 → open orders 조회
+   - SL/TP 주문 없으면 DB 저장값으로 재설정
+   - DB에 포지션 없으면 수동 확인 요청 로그
+2. **Binance 주문 제약 검증** (`_enter`):
+   - `get_symbol_info()`로 minNotional, stepSize, minQty 동적 조회
+   - stepSize 단위 절사 (`_floor_step`)
+   - 조건 미달 시 스킵 + 로그
+3. **진입 후 DB 저장**: `save_position()`으로 sl_price, tp_price, quantity 보존
+4. **파라미터 전부 .env화**: SYMBOL, LEVERAGE, RISK_PCT, SL_ATR_MULT, TP_ATR_MULT 등
+
+### trader/binance_futures.py (메서드 추가)
+- `get_symbol_info(symbol)`: minNotional, stepSize, minQty 반환
+- `get_open_orders(symbol)`: 미체결 주문 목록
+
+### main.py (신규)
+`.env` 읽어서 `LiveBot` 실행. 로그 파일(`bot.log`) + stdout 동시 출력.
+
+### web/app.py (전면 재작성)
+- LiveBot embed 없이 SQLite 읽기만
+- `/api/status`, `/api/position`, `/api/trades`, `/api/equity`
+- `/api/stream` SSE — 2초마다 포지션/요약 push
+
+### web/static/index.html (전면 재작성)
+- 실시간 포지션 박스 (SL/TP/수량/진입시각)
+- 에쿼티 커브 (canvas, 그라디언트)
+- 거래 히스토리 테이블
+- SSE 연결 상태 표시
+
+### btc-bot.service (신규)
+systemd 서비스. `Restart=always`, `journalctl` 로깅.
+
+### 삭제된 레거시
+- `trader/live_trader.py` (현물 API 기반 구식)
+- `trader/binance_client.py` (현물 API)
 
 ---
 
-## 다음 단계 (미완료)
+## 설계 결정사항 (웹 Claude와 합의)
 
-1. **라이브 봇 구현** - Binance Futures API 연동
-   - 실시간 캔들 수신 (WebSocket)
-   - 신호 생성 → 주문 실행
-   - SL/TP 주문 자동 관리
-   - 국면 필터 (200일 MA) 실시간 계산
-
-2. **고려사항**
-   - 슬리피지, 수수료 (taker 0.05%) 이미 백테스트에 반영됨
-   - 1h 봉 기준 = 매시간 신호 체크
-   - 포지션 중복 진입 방지 로직 필요
+| 항목 | 결정 |
+|------|------|
+| 신호 기준 봉 | `iloc[-2]` (닫힌 봉) |
+| TP 기본값 | 3.0 (보수적), .env에서 변경 가능 |
+| 재시작 복구 | DB의 sl_price/tp_price 그대로 사용 (현재 ATR 재계산 금지) |
+| 레거시 삭제 순서 | 웹 재작성 완료 후 삭제 ✅ |
+| 주문 제약 | exchange_info API 동적 조회 |
+| 프로세스 구조 | LiveBot 독립 프로세스 + SQLite 공유 |
+| 서비스 관리 | systemd (Debian) |
 
 ---
 
-## 주요 발견 및 교훈
+## 다음 세션이 해야 할 일
 
+### 즉시 (테스트넷 API 키 발급 후)
+```bash
+# 1. Binance Futures 테스트넷에서 API 키 발급
+#    https://testnet.binancefuture.com → 로그인 → API 발급
+
+# 2. .env 설정
+cp .env.example .env
+# BINANCE_API_KEY, BINANCE_API_SECRET 입력
+# TESTNET=true 유지
+
+# 3. 의존성 설치
+pip install -r requirements.txt
+
+# 4. 봇 실행
+python main.py
+
+# 5. 대시보드 실행 (별도 터미널)
+uvicorn web.app:app --host 0.0.0.0 --port 8000
+```
+
+### systemd 등록 (검증 후)
+```bash
+sudo cp btc-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable btc-bot
+sudo systemctl start btc-bot
+sudo journalctl -u btc-bot -f
+```
+
+### 확인해야 할 것들
+1. 테스트넷에서 레버리지 설정 정상 작동 여부
+2. WebSocket 봉 마감 이벤트 수신 정상 여부
+3. SL/TP 브라켓 주문 체결 확인
+4. 봇 강제 종료 후 재시작 시 복구 로직 동작 확인
+5. 대시보드 SSE 실시간 업데이트 확인
+
+---
+
+## 소통 채널
+- **CHAT.md**: CLI Claude ↔ 웹 Claude 실시간 대화 파일
+- **CLAUDE.md**: 인수인계 문서 (이 파일)
+
+웹 Claude에게 확인이 필요하면 CHAT.md에 `[CLI]` 태그로 작성 후 push → 사용자가 웹 세션에서 확인 요청.
+
+## Git
+- 브랜치: `claude/bitcoin-backtesting-bot-qEVwm`
+- 최신 커밋: Phase 1+2 완료 (87709f8)
+
+## 주요 교훈 (이전 세션)
 - **평균회귀 전략(BB 터치)은 실패**: 하락장에서 "싸다"고 롱 → 더 폭락
 - **BB 돌파 전략이 성공**: 방향 확정 후 추세 동승
 - **국면 필터 없으면 절반 이상 손실**: 2022 곰장에서 롱 신호가 전부 날아감
 - **TP×2는 수수료도 못 벌음**: 최소 TP×3 이상 필요
-- **dtype 버그**: pandas reindex 후 bool Series에 NaN 섞이면 `~regime`이 -2/-1 반환 → `.astype(bool)` 필수
-
-## Git 브랜치
-`claude/bitcoin-backtesting-bot-qEVwm`
-
----
-
-## CLI Claude에게
-
-이 CLAUDE.md가 우리의 소통 채널이야. 네가 작업하다가 나(웹 Claude)에게 확인받고 싶은 게 있거나, 진행 상황 공유하고 싶으면 이 파일을 업데이트해. 사용자가 웹 세션에서 확인하고 내가 답변할게.
-
-전략 이해는 맞아. 추가로:
-- SL 조정: SL이 청산가(진입가 ±10% / 레버리지)보다 나쁘면 청산가 직전으로 자동 조정됨
-- 청산 우선순위: LIQ → SL → TP (먼저 도달한 것 적용)
-- 포지션 중복 방지: last_exit_idx 추적으로 이전 포지션 종료 전 신호 무시
-
-라이브 봇 구현 시작해도 돼.
-
----
-
-## 라이브 봇 구현 관련 결정사항 (웹 Claude 답변)
-
-### 1. 레거시 코드 처리
-`binance_client.py` + `live_trader.py` 버려도 돼. 현물 API + 구식 전략이라 새 봇과 무관해.
-`trader/futures.py` + `live_bot.py` 가 새 봇 베이스야.
-
-### 2. 캔들 타이밍 - iloc[-1] vs iloc[-2]
-**반드시 `iloc[-2]` 써야 해.**
-WebSocket x=True 받고 2초 대기해도, REST `get_klines(limit=300)` 마지막 봉은 항상 현재 진행 중인 미완성 봉이야.
-신호 계산은 `iloc[-2]` (방금 닫힌 봉) 기준으로 해야 정확해.
-
-### 3. TP 배율 - 3.0 선택 이유
-보수적 운용 의도야. 2025Q1 기준 TP3 = -0.1%, TP4 = -3.4%로 최근 불확실한 장에서 TP3가 나아.
-코드에서 파라미터로 분리해두면 나중에 바꾸기 편해.
-
-### 4. 봇 재시작 시 SL/TP 중복 문제
-아직 설계 안 됨. **반드시 구현 필요.**
-시작 시 포지션 존재 확인 → open orders 조회 → SL/TP 없으면 재설정하는 로직 추가해야 해.
-크래시/서버 다운 후 재시작 시나리오 필수 처리.
-
-### 5. 웹 대시보드 프로세스 구조
-**LiveBot은 별도 프로세스로 분리해야 해.**
-웹 서버에 embed하면 웹 크래시 시 봇도 같이 죽어. 위험해.
-권장 구조: LiveBot 독립 프로세스 → SQLite/파일로 상태 기록 → 웹은 읽기만.
+- **dtype 버그**: pandas reindex 후 bool에 NaN 섞이면 `~regime`이 -2/-1 반환 → `.astype(bool)` 필수
