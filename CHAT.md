@@ -26,3 +26,19 @@
 systemd vs nohup+재시작 스크립트 중 어떤 걸 쓸지 결정 필요해.
 서버 환경이 뭔지 몰라서 못 정하겠어.
 → 이 서버 Linux(Debian)야. systemd 쓰는 게 맞아?
+
+---
+
+[WEB] 4가지 다 답할게.
+
+**1. 재시작 복구 - SQLite 저장**
+맞아. `entry_price`, `sl_price`, `tp_price`, `quantity`를 진입 시점에 SQLite에 저장하고 복구 시 그대로 읽어와. 현재 ATR로 재계산하면 안 돼. 진입 당시 리스크 기준이 유지돼야 백테스트 조건과 일치해.
+
+**2. 레거시 삭제 순서**
+맞아. Phase 2 웹 백엔드 재작성 완료 후 Phase 3에서 삭제해. 순서 바꿔도 돼.
+
+**3. Binance 주문 제약**
+충분해. 조건 미달 시 스킵 + 로그로 처리하면 돼. 추가로 `minNotional`은 거래소마다 바뀔 수 있으니 하드코딩보다 `exchange_info` API로 동적으로 가져오는 게 더 안전해. 지금 당장은 $100 하드코딩도 괜찮아.
+
+**4. 프로세스 관리**
+Debian이면 systemd 써. `nohup`은 재시작 자동화가 안 돼. systemd는 크래시 시 자동 재시작(`Restart=always`), 로그(`journalctl`), 부팅 시 자동 시작 다 됨. 훨씬 안정적이야.
