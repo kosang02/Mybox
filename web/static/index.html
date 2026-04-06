@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BTC Bot Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:#0d1117; --sf:#161b22; --sf2:#21262d; --bd:#30363d;
+      --tx:#e6edf3; --mt:#8b949e; --ac:#f7931a; --gn:#3fb950; --rd:#f85149; --bl:#388bfd;
+    }
+    body { font-family:'Segoe UI',system-ui,sans-serif; background:var(--bg); color:var(--tx); min-height:100vh; font-size:13px; }
+
+    nav { padding:12px 24px; background:var(--sf); border-bottom:1px solid var(--bd); display:flex; align-items:center; justify-content:space-between; }
+    .logo { font-weight:700; font-size:16px; color:var(--ac); }
+    .dot { width:8px; height:8px; border-radius:50%; background:var(--mt); display:inline-block; margin-right:6px; }
+    .dot.live { background:var(--gn); box-shadow:0 0 6px var(--gn); animation:pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+    .status-text { font-size:12px; color:var(--mt); }
+
+    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; padding:24px; }
+
+    .card { background:var(--sf); border:1px solid var(--bd); border-radius:10px; padding:16px; }
+    .card.accent { border-color:var(--ac); background:rgba(247,147,26,.05); }
+    .card .label { font-size:11px; color:var(--mt); margin-bottom:6px; text-transform:uppercase; letter-spacing:.4px; }
+    .card .value { font-size:22px; font-weight:700; }
+    .card .sub   { font-size:11px; color:var(--mt); margin-top:4px; }
+    .pos { color:var(--gn); } .neg { color:var(--rd); } .neu { color:var(--bl); }
+
+    section { padding:0 24px 24px; }
+    .sec-title { font-size:11px; font-weight:700; color:var(--mt); text-transform:uppercase; letter-spacing:.5px; margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid var(--bd); }
+
+    /* 포지션 박스 */
+    .pos-box { background:var(--sf); border:1px solid var(--bd); border-radius:10px; padding:20px; }
+    .pos-box.long-pos  { border-color:var(--gn); }
+    .pos-box.short-pos { border-color:var(--rd); }
+    .pos-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:12px; margin-top:14px; }
+    .pos-item .l { font-size:11px; color:var(--mt); margin-bottom:3px; }
+    .pos-item .v { font-size:15px; font-weight:600; }
+    .no-pos { color:var(--mt); text-align:center; padding:24px 0; }
+
+    /* 에쿼티 차트 */
+    .chart-wrap { background:var(--sf); border:1px solid var(--bd); border-radius:10px; padding:16px; }
+    canvas { width:100%; height:200px; display:block; }
+
+    /* 거래 테이블 */
+    .tbl-wrap { background:var(--sf); border:1px solid var(--bd); border-radius:10px; overflow:hidden; }
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    thead { background:var(--sf2); }
+    th { padding:9px 14px; text-align:left; color:var(--mt); font-weight:600; font-size:11px; }
+    td { padding:8px 14px; border-bottom:1px solid var(--bd); }
+    tr:last-child td { border-bottom:none; }
+    tr:hover td { background:var(--sf2); }
+    .badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; }
+    .badge.long  { background:rgba(63,185,80,.15);  color:var(--gn); }
+    .badge.short { background:rgba(248,81,73,.15);  color:var(--rd); }
+    .no-data { text-align:center; color:var(--mt); padding:20px; }
+
+    ::-webkit-scrollbar{width:5px} ::-webkit-scrollbar-thumb{background:var(--bd);border-radius:3px}
+  </style>
+</head>
+<body>
+
+<nav>
+  <span class="logo">₿ BTC Bot Dashboard</span>
+  <span><span class="dot" id="dot"></span><span class="status-text" id="status-text">연결 중...</span></span>
+</nav>
+
+<!-- 요약 카드 -->
+<div class="grid" id="summary-cards">
+  <div class="card accent"><div class="label">총 손익</div><div class="value" id="c-pnl">—</div></div>
+  <div class="card"><div class="label">총 거래</div><div class="value" id="c-trades">—</div></div>
+  <div class="card"><div class="label">승률</div><div class="value" id="c-winrate">—</div></div>
+  <div class="card"><div class="label">현재 포지션</div><div class="value" id="c-pos">없음</div></div>
+</div>
+
+<!-- 현재 포지션 -->
+<section>
+  <div class="sec-title">현재 포지션</div>
+  <div class="pos-box" id="pos-box">
+    <div class="no-pos">포지션 없음</div>
+  </div>
+</section>
+
+<!-- 에쿼티 차트 -->
+<section>
+  <div class="sec-title">에쿼티 커브</div>
+  <div class="chart-wrap">
+    <canvas id="equity-chart"></canvas>
+  </div>
+</section>
+
+<!-- 거래 히스토리 -->
+<section>
+  <div class="sec-title">거래 히스토리</div>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>방향</th><th>진입일</th><th>진입가</th><th>청산일</th><th>청산가</th><th>수량</th><th>손익</th><th>손익률</th><th>사유</th></tr>
+      </thead>
+      <tbody id="trade-tbody"><tr><td colspan="9" class="no-data">거래 없음</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+// ── 데이터 초기 로드 ─────────────────────────────────────────
+async function loadAll() {
+  const res  = await fetch('/api/status');
+  const data = await res.json();
+  renderSummary(data.summary);
+  renderPosition(data.position);
+  renderEquity(data.equity);
+  renderTrades(data.trades);
+}
+
+// ── SSE 실시간 업데이트 ──────────────────────────────────────
+function connectSSE() {
+  const src = new EventSource('/api/stream');
+
+  src.onopen = () => {
+    document.getElementById('dot').className = 'dot live';
+    document.getElementById('status-text').textContent = '실시간 연결됨';
+  };
+  src.onerror = () => {
+    document.getElementById('dot').className = 'dot';
+    document.getElementById('status-text').textContent = '연결 끊김 — 재연결 중...';
+  };
+  src.onmessage = e => {
+    const d = JSON.parse(e.data);
+    renderSummary(d.summary);
+    renderPosition(d.position);
+    if (d.equity && d.equity.length) updateEquityPoint(d.equity[0]);
+  };
+}
+
+// ── 렌더 함수 ────────────────────────────────────────────────
+function renderSummary(s) {
+  if (!s) return;
+  const pnl = s.total_pnl || 0;
+  const el  = document.getElementById('c-pnl');
+  el.textContent = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
+  el.className   = 'value ' + (pnl >= 0 ? 'pos' : 'neg');
+  document.getElementById('c-trades').textContent  = s.total_trades ?? '—';
+  document.getElementById('c-winrate').textContent = (s.win_rate != null ? s.win_rate + '%' : '—');
+}
+
+function renderPosition(pos) {
+  const box  = document.getElementById('pos-box');
+  const card = document.getElementById('c-pos');
+
+  if (!pos || !pos.side) {
+    box.className = 'pos-box';
+    box.innerHTML = '<div class="no-pos">포지션 없음</div>';
+    card.textContent = '없음';
+    card.className   = 'value neu';
+    return;
+  }
+
+  const isLong = pos.side === 'long';
+  box.className = 'pos-box ' + (isLong ? 'long-pos' : 'short-pos');
+  card.textContent = isLong ? '롱 ▲' : '숏 ▼';
+  card.className   = 'value ' + (isLong ? 'pos' : 'neg');
+
+  box.innerHTML = `
+    <div style="font-size:15px;font-weight:700;color:${isLong?'var(--gn)':'var(--rd)'}">${isLong?'롱 ▲':'숏 ▼'}</div>
+    <div class="pos-grid">
+      <div class="pos-item"><div class="l">진입가</div><div class="v">$${fmt(pos.entry_price)}</div></div>
+      <div class="pos-item"><div class="l">SL</div><div class="v neg">$${fmt(pos.sl_price)}</div></div>
+      <div class="pos-item"><div class="l">TP</div><div class="v pos">$${fmt(pos.tp_price)}</div></div>
+      <div class="pos-item"><div class="l">수량</div><div class="v">${pos.quantity} BTC</div></div>
+      <div class="pos-item"><div class="l">진입 시각</div><div class="v" style="font-size:12px">${(pos.entry_time||'').slice(0,19)}</div></div>
+    </div>`;
+}
+
+function renderTrades(trades) {
+  const tbody = document.getElementById('trade-tbody');
+  if (!trades || !trades.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="no-data">거래 없음</td></tr>';
+    return;
+  }
+  tbody.innerHTML = trades.map(t => {
+    const pnl  = t.pnl || 0;
+    const cls  = pnl >= 0 ? 'pos' : 'neg';
+    const sign = pnl >= 0 ? '+' : '';
+    return `<tr>
+      <td><span class="badge ${t.side}">${t.side === 'long' ? '롱' : '숏'}</span></td>
+      <td>${(t.entry_time||'').slice(0,16)}</td>
+      <td>$${fmt(t.entry_price)}</td>
+      <td>${(t.exit_time||'').slice(0,16)}</td>
+      <td>$${fmt(t.exit_price)}</td>
+      <td>${t.quantity}</td>
+      <td class="${cls}">${sign}$${fmt(pnl)}</td>
+      <td class="${cls}">${sign}${(t.pnl_pct||0).toFixed(2)}%</td>
+      <td style="color:var(--mt);font-size:11px">${t.exit_reason||'—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── 에쿼티 차트 (canvas) ─────────────────────────────────────
+let equityData = [];
+
+function renderEquity(points) {
+  if (!points || !points.length) return;
+  equityData = points.map(p => ({ x: p.ts, y: p.value }));
+  drawChart();
+}
+
+function updateEquityPoint(point) {
+  if (!point) return;
+  equityData.push({ x: point.ts, y: point.value });
+  if (equityData.length > 500) equityData.shift();
+  drawChart();
+}
+
+function drawChart() {
+  const canvas = document.getElementById('equity-chart');
+  const dpr    = window.devicePixelRatio || 1;
+  const W      = canvas.parentElement.clientWidth - 32;
+  const H      = 200;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  if (!equityData.length) return;
+
+  const vals  = equityData.map(p => p.y);
+  const minV  = Math.min(...vals);
+  const maxV  = Math.max(...vals);
+  const range = maxV - minV || 1;
+  const pad   = { t:10, r:10, b:10, l:10 };
+  const cW    = W - pad.l - pad.r;
+  const cH    = H - pad.t - pad.b;
+
+  const toX = i => pad.l + (i / (equityData.length - 1 || 1)) * cW;
+  const toY = v => pad.t + (1 - (v - minV) / range) * cH;
+
+  // 그라디언트 채우기
+  const grad = ctx.createLinearGradient(0, pad.t, 0, pad.t + cH);
+  const isUp = vals[vals.length - 1] >= vals[0];
+  const col  = isUp ? '63,185,80' : '248,81,73';
+  grad.addColorStop(0,   `rgba(${col},.35)`);
+  grad.addColorStop(1,   `rgba(${col},0)`);
+
+  ctx.beginPath();
+  equityData.forEach((p, i) => {
+    const x = toX(i), y = toY(p.y);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.lineTo(toX(equityData.length - 1), pad.t + cH);
+  ctx.lineTo(toX(0), pad.t + cH);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // 선
+  ctx.beginPath();
+  equityData.forEach((p, i) => {
+    const x = toX(i), y = toY(p.y);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = `rgb(${col})`;
+  ctx.lineWidth   = 1.5;
+  ctx.stroke();
+}
+
+// ── 유틸 ─────────────────────────────────────────────────────
+function fmt(v) {
+  return v == null ? '—' : parseFloat(v).toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
+}
+
+// ── 초기화 ───────────────────────────────────────────────────
+loadAll();
+connectSSE();
+window.addEventListener('resize', drawChart);
+</script>
+</body>
+</html>
