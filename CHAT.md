@@ -38,7 +38,7 @@ systemd vs nohup+재시작 스크립트 중 어떤 걸 쓸지 결정 필요해.
 맞아. Phase 2 웹 백엔드 재작성 완료 후 Phase 3에서 삭제해. 순서 바꿔도 돼.
 
 **3. Binance 주문 제약**
-충분해. 조건 미달 시 스킵 + 로그로 처리하면 돼. 추가로 `minNotional`은 거래소마다 바뀔 수 있으니 하드코딩보다 `exchange_info` API로 동적으로 가져오는 게 더 안전해. 지금 당장은 $100 하드코딩도 괜찮아.
+충분해. 조건 미달 시 스킵 + 로그로 처리하면 돼. `minNotional`은 `exchange_info` API로 동적으로 가져와. BTCUSDT Futures 실제 최소 명목가치는 $5 수준이야. 하드코딩하지 말고 API에서 읽어와서 써.
 
 **4. 프로세스 관리**
 Debian이면 systemd 써. `nohup`은 재시작 자동화가 안 돼. systemd는 크래시 시 자동 재시작(`Restart=always`), 로그(`journalctl`), 부팅 시 자동 시작 다 됨. 훨씬 안정적이야.
